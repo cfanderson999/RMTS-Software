@@ -175,6 +175,7 @@ class RadioManager(QObject):
         self.toSend = []
         self.clearOutputBuffer = False
         self.port = None
+        self.connected = False
         self._lastPacketRecv = 0
         self.setupSerialThread()
 
@@ -185,6 +186,8 @@ class RadioManager(QObject):
         return checksum and rightLength
 
     def sendPacket(self, packet, resendCount=5):
+        if not self.connected:
+            return
         logger.log('Sending packet with details ({}) {} times'.format(packet, resendCount))
         seqNumLow = packet.seqNum & 0xFF
         seqNumHigh = (packet.seqNum >> 8) & 0xFF
@@ -205,7 +208,7 @@ class RadioManager(QObject):
         self.newPacket.emit(pack)
 
     def setupSerialThread(self):
-        self.serialThread = Thread(target=self._serialThread)
+        self.serialThread = Thread(target=self._serialThread, daemon=True)
         self.running = False
         self.closed = False
 
@@ -218,16 +221,23 @@ class RadioManager(QObject):
                     self.closed = False
                     lastFailure = None
                     self._communicate(serport)
-            except (serial.SerialException, OSError) as e:
-                failure = str(e)
+            except Exception as e:
+                failure = '{}: {}'.format(type(e).__name__, e)
                 if failure != lastFailure:
                     logger.warn('Radio on port ({}) unavailable, retrying every {} s: {}'.format(
                         self.port, RadioManager.RECONNECT_INTERVAL, failure))
                     lastFailure = failure
                 self._waitToReconnect()
+            finally:
+                self.connected = False
+                self._discardUnsentPackets()
 
         self.closed = True
         logger.log('Serial thread exited')
+
+    def _discardUnsentPackets(self):
+        self.toSend = []
+        self.clearOutputBuffer = False
 
     def _waitToReconnect(self):
         deadline = time.monotonic() + RadioManager.RECONNECT_INTERVAL
@@ -235,6 +245,8 @@ class RadioManager(QObject):
             time.sleep(0.05)
 
     def _communicate(self, serport):
+        self._discardUnsentPackets()
+        self.connected = True
         escape = False
         packetBuff = []
         inPreamble = False
